@@ -6,8 +6,11 @@ Telegram-бот для перевода между грузинским чат-�
     - 3 режима перевода (/settings): GEO Translit -> RU, RU -> GEO Translit,
       GEO Translit -> ქართული (мхедрули).
     - Тональность перевода (/settings): официальная / разговорная.
-    - Кнопка "🇬🇪 На грузинский алфавит" под переводом (режим 1) — мгновенно
-      дописывает исходный текст буквами мхедрули.
+    - Режим GEO Translit -> RU использует двухэтапную обработку со смарт-
+      маршрутизацией (см. ниже) вместо прямого вызова Gemini.
+    - Кнопка "🇬🇪 Исходный текст (Мхедрули)" под переводом (режим 1) —
+      мгновенно показывает исходный текст, сконвертированный в мхедрули
+      локально (без обращения к какому-либо API).
     - Кнопка "🔍 Разбор" (режим 1) — короткий разбор тона, нюансов и ключевых
       слов фразы.
     - Кнопка "⭐ Сохранить" под любым переводом — сохраняет пару текстов в
@@ -16,16 +19,30 @@ Telegram-бот для перевода между грузинским чат-�
     - /alphabet — статичная шпаргалка по "сложным" буквосочетаниям транслита
       (без обращения к Gemini).
 
-Код разбит на модули:
-    - prompts.py    — тексты системных промтов и шпаргалка
-    - modes.py       — конфигурация режимов/тональности, сборка промта
-    - db.py          — SQLAlchemy + SQLite, таблица vocabulary
-    - keyboards.py   — общие клавиатуры (меню, /settings, кнопки под переводом)
-    - vocabulary.py  — отрисовка страниц личного словаря
-    - main.py (этот файл) — хендлеры aiogram и точка входа
+Смарт-маршрутизация для GEO Translit -> RU (translate_geo_to_ru_smart ниже):
+    Этап 1. Локальная транслитерация латиницы в мхедрули
+            (transliteration.transliterate_to_mkhedruli) — без ИИ.
+    Этап 2. Оценка сложности текста (smart_routing.is_simple_text) — эвристика,
+            не ИИ.
+    Этап 3. Выбор провайдера перевода:
+            - простой текст -> бесплатный Google Translate (deep_translator);
+            - сложный текст -> Gemini (лучше справляется с контекстом,
+              сленгом, неоднозначностями транслита и опечатками).
+            Если выбранный провайдер недоступен (ошибка сети, лимит 429 и
+            т.п.) — автоматический фоллбэк на другой провайдер, в обе стороны.
 
-Стек: aiogram 3.x, google-genai (Gemini API, модель gemini-3.6-flash),
-SQLAlchemy (async) + aiosqlite.
+Код разбит на модули:
+    - prompts.py         — тексты системных промтов и шпаргалка
+    - modes.py            — конфигурация режимов/тональности, сборка промта
+    - transliteration.py  — локальный конвертер латиница -> мхедрули
+    - smart_routing.py    — is_simple_text + перевод через Google Translate
+    - db.py               — SQLAlchemy + SQLite, таблица vocabulary
+    - keyboards.py        — общие клавиатуры (меню, /settings, кнопки под переводом)
+    - vocabulary.py       — отрисовка страниц личного словаря
+    - main.py (этот файл) — хендлеры aiogram, оркестрация пайплайна, точка входа
+
+Стек: aiogram 3.x, google-genai (Gemini API), deep_translator (Google
+Translate), SQLAlchemy (async) + aiosqlite.
 
 Запуск:
     python main.py
@@ -43,7 +60,7 @@ import os
 import re
 import sys
 from collections import OrderedDict
-from typing import Dict, Optional, Tuple
+from typing import Dict, NamedTuple, Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -72,7 +89,9 @@ from keyboards import (
     replace_button,
 )
 from modes import DEFAULT_MODE, DEFAULT_TONE, MODE_GEO_RU, MODES, TONES, build_system_prompt
-from prompts import ALPHABET_CHEATSHEET_HTML, EXPLAIN_PROMPT, SYSTEM_PROMPT_GEO_TO_KA
+from prompts import ALPHABET_CHEATSHEET_HTML, EXPLAIN_PROMPT
+from smart_routing import is_simple_text, translate_via_google
+from transliteration import transliterate_to_mkhedruli
 from vocabulary import VOCAB_DELETE_CALLBACK_PREFIX, VOCAB_PAGE_CALLBACK_PREFIX, render_vocabulary_page
 
 # --------------------------------------------------------------------------- #
@@ -83,6 +102,11 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# ВАЖНО: здесь сознательно используется gemini-3.6-flash, а не gemini-2.5-flash.
+# gemini-2.5-flash закрыта Google для новых пользователей API (см. README) —
+# использование её в качестве "модели для сложного текста" привело бы к тем
+# же 404 NOT_FOUND, что мы уже чинили ранее в этом проекте. GEMINI_MODEL —
+# единая точка правды для всех вызовов Gemini в боте.
 GEMINI_MODEL = "gemini-3.6-flash"
 
 logging.basicConfig(
@@ -106,40 +130,39 @@ if not GEMINI_API_KEY:
 user_modes: Dict[int, str] = {}
 user_tones: Dict[int, str] = {}
 
-# Кэш последних переводов для кнопки "⭐ Сохранить": (chat_id, message_id) -> (original, translated).
+
+class PendingTranslation(NamedTuple):
+    """Данные последнего перевода под конкретным сообщением бота — для кнопок
+    "Сохранить", "Разбор" и "Исходный текст (Мхедрули)"."""
+
+    original_text: str
+    translated_text: str
+    mkhedruli_text: Optional[str] = None  # заполняется только для режима GEO_RU
+
+
+# Кэш последних переводов: (chat_id, message_id) -> PendingTranslation.
 # Ограничен по размеру, чтобы не течь по памяти на долго работающем процессе.
+# Ограничение: после перезапуска бота кэш пуст, и кнопки под уже отправленными
+# сообщениями ответят подсказкой "отправьте фразу ещё раз" — см. README.
 MAX_PENDING_TRANSLATIONS = 2000
-pending_translations: "OrderedDict[Tuple[int, int], Tuple[str, str]]" = OrderedDict()
+pending_translations: "OrderedDict[Tuple[int, int], PendingTranslation]" = OrderedDict()
 
 
-def remember_translation(chat_id: int, message_id: int, original: str, translated: str) -> None:
+def remember_translation(
+    chat_id: int,
+    message_id: int,
+    original: str,
+    translated: str,
+    mkhedruli: Optional[str] = None,
+) -> None:
     key = (chat_id, message_id)
-    pending_translations[key] = (original, translated)
+    pending_translations[key] = PendingTranslation(original, translated, mkhedruli)
     pending_translations.move_to_end(key)
     while len(pending_translations) > MAX_PENDING_TRANSLATIONS:
         pending_translations.popitem(last=False)
 
 
-# Метки, которыми размечен ответ бота в режиме GEO Translit -> RU. Используются
-# для регэксп-парсинга исходного текста и перевода из тела сообщения (кнопки
-# "На грузинский алфавит" и "Разбор" не нуждаются в отдельном хранилище и
-# продолжают работать даже после перезапуска бота).
-TRANSLIT_LABEL = "Транслит:"
-TRANSLATION_LABEL = "Перевод:"
-MKHEDRULI_LABEL = "Мхедрули:"
-
-
-def extract_translit_pair(text: str) -> Optional[Tuple[str, str]]:
-    match = re.search(
-        rf"{re.escape(TRANSLIT_LABEL)}\s*(.*?)\n\n{re.escape(TRANSLATION_LABEL)}"
-        rf"\s*(.*?)(?:\n\n{re.escape(MKHEDRULI_LABEL)}|$)",
-        text,
-        re.DOTALL,
-    )
-    if not match:
-        return None
-    return match.group(1).strip(), match.group(2).strip()
-
+MKHEDRULI_REVEAL_PREFIX = "🇬🇪 Мхедрули:"
 
 # --------------------------------------------------------------------------- #
 # Клиент Gemini
@@ -169,11 +192,50 @@ async def call_gemini(contents: str, system_prompt: str) -> str:
     return result
 
 
+async def translate_geo_to_ru_smart(user_text: str, tone: str) -> Tuple[str, str, str]:
+    """
+    Полный пайплайн режима GEO Translit -> RU: локальная транслитерация в
+    мхедрули -> оценка сложности -> перевод через Google Translate (простой
+    текст) или Gemini (сложный текст), с автоматическим фоллбэком на другой
+    провайдер в обе стороны, если выбранный недоступен.
+
+    Возвращает (translated_text, mkhedruli_text, provider) — provider только
+    для логирования/отладки (какой путь сработал).
+    """
+    mkhedruli_text = transliterate_to_mkhedruli(user_text)
+    system_prompt = build_system_prompt(MODE_GEO_RU, tone)
+
+    if is_simple_text(mkhedruli_text):
+        try:
+            translated = await translate_via_google(mkhedruli_text)
+            return translated, mkhedruli_text, "google_translate"
+        except Exception as google_exc:
+            logger.warning(
+                "Google Translate недоступен для простого текста (%s), пробую Gemini", google_exc
+            )
+            translated = await call_gemini(mkhedruli_text, system_prompt)
+            return translated, mkhedruli_text, "gemini_fallback"
+
+    try:
+        translated = await call_gemini(mkhedruli_text, system_prompt)
+        return translated, mkhedruli_text, "gemini"
+    except Exception as gemini_exc:
+        logger.warning(
+            "Gemini недоступен для сложного текста (%s), переключаюсь на Google Translate", gemini_exc
+        )
+        try:
+            translated = await translate_via_google(mkhedruli_text)
+            return translated, mkhedruli_text, "google_translate_fallback"
+        except Exception:
+            logger.exception("Google Translate тоже недоступен — оба провайдера отказали")
+            raise gemini_exc  # пробрасываем исходную ошибку Gemini (например, 429) наверх
+
+
 def user_facing_gemini_error(exc: Exception) -> str:
     """
-    Превращает исключение от Gemini API в понятное пользователю сообщение.
-    Отдельно обрабатывает превышение квоты (429 RESOURCE_EXHAUSTED) — самая
-    частая причина сбоев на бесплатном тарифе.
+    Превращает исключение от Gemini API (или от обоих провайдеров сразу) в
+    понятное пользователю сообщение. Отдельно обрабатывает превышение квоты
+    (429 RESOURCE_EXHAUSTED) — самая частая причина сбоев на бесплатном тарифе.
     """
     if isinstance(exc, genai_errors.ClientError) and exc.code == 429:
         return (
@@ -328,48 +390,41 @@ async def handle_tone_selection(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == MHEDRULI_CALLBACK_DATA)
 async def handle_mhedruli_button(callback: CallbackQuery) -> None:
     message = callback.message
-    text = message.text or ""
-
-    if MKHEDRULI_LABEL in text:
-        await callback.answer("Уже показано ниже")
+    record = pending_translations.get((message.chat.id, message.message_id))
+    if not record or record.mkhedruli_text is None:
+        await callback.answer(
+            "Не удалось показать исходный текст: сообщение устарело. Отправьте фразу ещё раз.",
+            show_alert=True,
+        )
         return
-
-    pair = extract_translit_pair(text)
-    if not pair:
-        await callback.answer("Не удалось найти исходный текст в сообщении", show_alert=True)
-        return
-    original_text, _translation = pair
 
     await callback.answer()  # сразу убираем "часики" на кнопке
+    await message.answer(f"{MKHEDRULI_REVEAL_PREFIX} {record.mkhedruli_text}")
 
     try:
-        mkhedruli_text = await call_gemini(original_text, SYSTEM_PROMPT_GEO_TO_KA)
-    except Exception as exc:
-        logger.exception("Ошибка при конвертации в мхедрули (chat_id=%s)", message.chat.id)
-        await message.answer(user_facing_gemini_error(exc))
-        return
-
-    new_text = f"{text}\n\n{MKHEDRULI_LABEL} {mkhedruli_text}"
-    try:
-        await message.edit_text(new_text)
+        new_kb = replace_button(
+            message.reply_markup, MHEDRULI_CALLBACK_DATA, "✅ Исходный текст показан", NOOP_CALLBACK_DATA
+        )
+        if new_kb is not None:
+            await message.edit_reply_markup(reply_markup=new_kb)
     except TelegramBadRequest:
-        logger.exception("Не удалось отредактировать сообщение с мхедрули (chat_id=%s)", message.chat.id)
+        pass
 
 
 @router.callback_query(F.data == EXPLAIN_CALLBACK_DATA)
 async def handle_explain_button(callback: CallbackQuery) -> None:
     message = callback.message
-    text = message.text or ""
-
-    pair = extract_translit_pair(text)
-    if not pair:
-        await callback.answer("Не удалось найти текст для разбора", show_alert=True)
+    record = pending_translations.get((message.chat.id, message.message_id))
+    if not record:
+        await callback.answer(
+            "Не удалось выполнить разбор: сообщение устарело. Отправьте фразу ещё раз.",
+            show_alert=True,
+        )
         return
-    original_text, translated_text = pair
 
     await callback.answer()
 
-    prompt_input = f"{TRANSLIT_LABEL} {original_text}\n{TRANSLATION_LABEL} {translated_text}"
+    prompt_input = f"Транслит: {record.original_text}\nПеревод: {record.translated_text}"
     try:
         explanation = await call_gemini(prompt_input, EXPLAIN_PROMPT)
     except Exception as exc:
@@ -390,17 +445,16 @@ async def handle_explain_button(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == SAVE_CALLBACK_DATA)
 async def handle_save_button(callback: CallbackQuery) -> None:
     message = callback.message
-    pair = pending_translations.get((message.chat.id, message.message_id))
-    if not pair:
+    record = pending_translations.get((message.chat.id, message.message_id))
+    if not record:
         await callback.answer(
             "Не удалось сохранить: сообщение устарело. Отправьте фразу ещё раз.",
             show_alert=True,
         )
         return
-    original_text, translated_text = pair
 
     try:
-        await db.add_vocabulary_entry(callback.from_user.id, original_text, translated_text)
+        await db.add_vocabulary_entry(callback.from_user.id, record.original_text, record.translated_text)
     except Exception:
         logger.exception("Ошибка при сохранении в словарь (user_id=%s)", callback.from_user.id)
         await callback.answer("⚠️ Не удалось сохранить. Попробуйте ещё раз.", show_alert=True)
@@ -476,26 +530,32 @@ async def handle_text(message: Message) -> None:
     user_id = message.from_user.id
     mode = user_modes.get(user_id, DEFAULT_MODE)
     tone = user_tones.get(user_id, DEFAULT_TONE)
-    system_prompt = build_system_prompt(mode, tone)
 
     await message.bot.send_chat_action(message.chat.id, "typing")
 
-    try:
-        result = await call_gemini(user_text, system_prompt)
-    except Exception as exc:
-        logger.exception(
-            "Ошибка при обращении к Gemini API (chat_id=%s, mode=%s)", message.chat.id, mode
-        )
-        await message.answer(user_facing_gemini_error(exc))
-        return
+    mkhedruli_text: Optional[str] = None
 
     if mode == MODE_GEO_RU:
-        reply_text = f"{TRANSLIT_LABEL} {user_text}\n\n{TRANSLATION_LABEL} {result}"
+        try:
+            result, mkhedruli_text, provider = await translate_geo_to_ru_smart(user_text, tone)
+        except Exception as exc:
+            logger.exception("Ошибка перевода GEO->RU через смарт-роутинг (chat_id=%s)", message.chat.id)
+            await message.answer(user_facing_gemini_error(exc))
+            return
+        logger.info("GEO->RU переведено через %s (chat_id=%s)", provider, message.chat.id)
     else:
-        reply_text = result
+        system_prompt = build_system_prompt(mode, tone)
+        try:
+            result = await call_gemini(user_text, system_prompt)
+        except Exception as exc:
+            logger.exception(
+                "Ошибка при обращении к Gemini API (chat_id=%s, mode=%s)", message.chat.id, mode
+            )
+            await message.answer(user_facing_gemini_error(exc))
+            return
 
-    sent = await message.answer(reply_text, reply_markup=build_translation_keyboard(mode))
-    remember_translation(sent.chat.id, sent.message_id, user_text, result)
+    sent = await message.answer(result, reply_markup=build_translation_keyboard(mode))
+    remember_translation(sent.chat.id, sent.message_id, user_text, result, mkhedruli_text)
 
 
 @router.message()

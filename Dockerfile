@@ -9,7 +9,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py db.py modes.py prompts.py keyboards.py vocabulary.py .
+COPY main.py db.py modes.py prompts.py keyboards.py vocabulary.py transliteration.py smart_routing.py .
 
 # Бот работает через long polling — открывать HTTP-порт не нужно
 CMD ["python", "main.py"]

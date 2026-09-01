@@ -8,7 +8,7 @@ from prompts import (
     CASUAL_STYLE,
     OFFICIAL_STYLE,
     SYSTEM_PROMPT_GEO_TO_KA,
-    SYSTEM_PROMPT_GEO_TO_RU,
+    SYSTEM_PROMPT_GEO_TO_RU_COMPLEX,
     SYSTEM_PROMPT_RU_TO_GEO,
 )
 
@@ -22,7 +22,9 @@ MODE_GEO_KA = "geo_ka"
 DEFAULT_MODE = MODE_GEO_RU
 
 MODES: Dict[str, Dict[str, str]] = {
-    MODE_GEO_RU: {"label": "GEO Translit ➡️ RU", "prompt": SYSTEM_PROMPT_GEO_TO_RU},
+    # "prompt" для GEO_RU используется только на "сложной" ветке смарт-роутинга
+    # (translate_geo_to_ru_smart в main.py) — простые фразы до Gemini не доходят.
+    MODE_GEO_RU: {"label": "GEO Translit ➡️ RU", "prompt": SYSTEM_PROMPT_GEO_TO_RU_COMPLEX},
     MODE_RU_GEO: {"label": "RU ➡️ GEO Translit", "prompt": SYSTEM_PROMPT_RU_TO_GEO},
     MODE_GEO_KA: {"label": "GEO Translit ➡️ ქართული", "prompt": SYSTEM_PROMPT_GEO_TO_KA},
 }

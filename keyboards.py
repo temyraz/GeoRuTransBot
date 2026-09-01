@@ -78,7 +78,7 @@ def render_settings_text(current_mode: str, current_tone: str) -> str:
 # Клавиатура под каждым переводом
 # --------------------------------------------------------------------------- #
 
-MHEDRULI_BUTTON_TEXT = "🇬🇪 На грузинский алфавит"
+MHEDRULI_BUTTON_TEXT = "🇬🇪 Исходный текст (Мхедрули)"
 MHEDRULI_CALLBACK_DATA = "mhedruli"
 
 EXPLAIN_BUTTON_TEXT = "🔍 Разбор"
