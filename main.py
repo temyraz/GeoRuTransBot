@@ -72,6 +72,8 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 import db
+from cache import cache_translation, get_cached_translation
+from deduplicator import deduplicate_translation_request
 from keyboards import (
     EXPLAIN_CALLBACK_DATA,
     MENU_BUTTON_ALPHABET,
@@ -108,6 +110,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # же 404 NOT_FOUND, что мы уже чинили ранее в этом проекте. GEMINI_MODEL —
 # единая точка правды для всех вызовов Gemini в боте.
 GEMINI_MODEL = "gemini-3.6-flash"
+GEMINI_TIMEOUT = 15  # секунды — максимум времени на ответ от Gemini
+GOOGLE_TRANSLATE_TIMEOUT = 10  # секунды — максимум для Google Translate
+MAX_CONCURRENT_GEMINI_REQUESTS = 3  # максимум параллельных запросов к Gemini
 
 logging.basicConfig(
     level=logging.INFO,
@@ -170,20 +175,44 @@ MKHEDRULI_REVEAL_PREFIX = "🇬🇪 Мхедрули:"
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
+# ⚡ Семафор для ограничения параллельных запросов к Gemini
+# Предотвращает перегрузку API при одновременных запросах от множества пользователей
+_gemini_semaphore: Optional[asyncio.Semaphore] = None
+
+def _get_gemini_semaphore() -> asyncio.Semaphore:
+    """Ленивая инициализация семафора."""
+    global _gemini_semaphore
+    if _gemini_semaphore is None:
+        _gemini_semaphore = asyncio.Semaphore(MAX_CONCURRENT_GEMINI_REQUESTS)
+    return _gemini_semaphore
+
 
 async def call_gemini(contents: str, system_prompt: str) -> str:
     """
     Отправляет текст в Gemini с заданным системным промтом и возвращает результат.
     Бросает исключение наверх при ошибке — обработка на стороне вызывающего кода.
+    Имеет таймаут для предотвращения зависаний.
+    
+    ⚡ Использует семафор для ограничения параллельных запросов (до MAX_CONCURRENT_GEMINI_REQUESTS).
+    Это предотвращает перегрузку Gemini API при пиковых нагрузках.
     """
-    response = await gemini_client.aio.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            temperature=0.2,
-        ),
-    )
+    semaphore = _get_gemini_semaphore()
+    
+    async with semaphore:
+        try:
+            response = await asyncio.wait_for(
+                gemini_client.aio.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        temperature=0.2,
+                    ),
+                ),
+                timeout=GEMINI_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"Gemini API не ответила за {GEMINI_TIMEOUT} секунд")
 
     result = (response.text or "").strip()
     if not result:
@@ -201,30 +230,50 @@ async def translate_geo_to_ru_smart(user_text: str, tone: str) -> Tuple[str, str
 
     Возвращает (translated_text, mkhedruli_text, provider) — provider только
     для логирования/отладки (какой путь сработал).
+    
+    ⚡ Использует кэш для избежания повторных API-запросов.
     """
     mkhedruli_text = transliterate_to_mkhedruli(user_text)
+    
+    # Проверяем кэш
+    cached = get_cached_translation(MODE_GEO_RU, tone, user_text)
+    if cached is not None:
+        translated, cached_mkhedruli, provider = cached
+        logger.info("Перевод найден в кэше (режим GEO->RU, chat_text=%s)", user_text[:50])
+        return translated, cached_mkhedruli or mkhedruli_text, f"{provider}_cached"
+    
     system_prompt = build_system_prompt(MODE_GEO_RU, tone)
 
     if is_simple_text(mkhedruli_text):
         try:
-            translated = await translate_via_google(mkhedruli_text)
+            translated = await asyncio.wait_for(
+                translate_via_google(mkhedruli_text),
+                timeout=GOOGLE_TRANSLATE_TIMEOUT
+            )
+            cache_translation(MODE_GEO_RU, tone, user_text, translated, mkhedruli_text, "google_translate")
             return translated, mkhedruli_text, "google_translate"
-        except Exception as google_exc:
+        except (asyncio.TimeoutError, Exception) as google_exc:
             logger.warning(
                 "Google Translate недоступен для простого текста (%s), пробую Gemini", google_exc
             )
             translated = await call_gemini(mkhedruli_text, system_prompt)
+            cache_translation(MODE_GEO_RU, tone, user_text, translated, mkhedruli_text, "gemini_fallback")
             return translated, mkhedruli_text, "gemini_fallback"
 
     try:
         translated = await call_gemini(mkhedruli_text, system_prompt)
+        cache_translation(MODE_GEO_RU, tone, user_text, translated, mkhedruli_text, "gemini")
         return translated, mkhedruli_text, "gemini"
     except Exception as gemini_exc:
         logger.warning(
             "Gemini недоступен для сложного текста (%s), переключаюсь на Google Translate", gemini_exc
         )
         try:
-            translated = await translate_via_google(mkhedruli_text)
+            translated = await asyncio.wait_for(
+                translate_via_google(mkhedruli_text),
+                timeout=GOOGLE_TRANSLATE_TIMEOUT
+            )
+            cache_translation(MODE_GEO_RU, tone, user_text, translated, mkhedruli_text, "google_translate_fallback")
             return translated, mkhedruli_text, "google_translate_fallback"
         except Exception:
             logger.exception("Google Translate тоже недоступен — оба провайдера отказали")
@@ -535,24 +584,33 @@ async def handle_text(message: Message) -> None:
 
     mkhedruli_text: Optional[str] = None
 
-    if mode == MODE_GEO_RU:
-        try:
-            result, mkhedruli_text, provider = await translate_geo_to_ru_smart(user_text, tone)
-        except Exception as exc:
-            logger.exception("Ошибка перевода GEO->RU через смарт-роутинг (chat_id=%s)", message.chat.id)
-            await message.answer(user_facing_gemini_error(exc))
-            return
-        logger.info("GEO->RU переведено через %s (chat_id=%s)", provider, message.chat.id)
-    else:
-        system_prompt = build_system_prompt(mode, tone)
-        try:
+    async def do_translate() -> Tuple[str, Optional[str], str]:
+        """Внутренняя функция для перевода — используется дедупликатором."""
+        if mode == MODE_GEO_RU:
+            return await translate_geo_to_ru_smart(user_text, tone)
+        else:
+            # Проверяем кэш для других режимов (RU->GEO, GEO->мхедрули)
+            cached = get_cached_translation(mode, tone, user_text)
+            if cached is not None:
+                result, _, provider = cached
+                logger.info("Перевод найден в кэше (режим %s, chat_text=%s)", mode, user_text[:50])
+                return result, None, f"{provider}_cached"
+            
+            system_prompt = build_system_prompt(mode, tone)
             result = await call_gemini(user_text, system_prompt)
-        except Exception as exc:
-            logger.exception(
-                "Ошибка при обращении к Gemini API (chat_id=%s, mode=%s)", message.chat.id, mode
-            )
-            await message.answer(user_facing_gemini_error(exc))
-            return
+            cache_translation(mode, tone, user_text, result, None, "gemini")
+            return result, None, "gemini"
+
+    try:
+        # Используем дедупликатор для избежания параллельных запросов одного и того же текста
+        result, mkhedruli_text, provider = await deduplicate_translation_request(
+            mode, tone, user_text, do_translate
+        )
+        logger.info("Текст переведён (режим %s, provider=%s, chat_id=%s)", mode, provider, message.chat.id)
+    except Exception as exc:
+        logger.exception("Ошибка при переводе (chat_id=%s, mode=%s)", message.chat.id, mode)
+        await message.answer(user_facing_gemini_error(exc))
+        return
 
     sent = await message.answer(result, reply_markup=build_translation_keyboard(mode))
     remember_translation(sent.chat.id, sent.message_id, user_text, result, mkhedruli_text)
@@ -567,8 +625,44 @@ async def handle_other(message: Message) -> None:
 # Точка входа
 # --------------------------------------------------------------------------- #
 
+async def _warm_up_cache() -> None:
+    """
+    ⚡ Предварительно загружает кэш с популярными фразами при старте.
+    Это снижает задержку при первых запросах пользователей.
+    """
+    popular_phrases = [
+        "gamarjoba",     # привет
+        "madloba",       # спасибо
+        "rogor xar",     # как дела
+        "ara",           # нет
+        "ki",            # да
+    ]
+    
+    logger.info("Прогрев кэша с популярными фразами...")
+    
+    # Используем Google Translate для простых фраз (быстро и бесплатно)
+    for phrase in popular_phrases:
+        if get_cached_translation(MODE_GEO_RU, DEFAULT_TONE, phrase) is None:
+            try:
+                mkhedruli_text = transliterate_to_mkhedruli(phrase)
+                if is_simple_text(mkhedruli_text):
+                    translated = await asyncio.wait_for(
+                        translate_via_google(mkhedruli_text),
+                        timeout=GOOGLE_TRANSLATE_TIMEOUT
+                    )
+                    cache_translation(MODE_GEO_RU, DEFAULT_TONE, phrase, translated, mkhedruli_text, "google_translate")
+                    logger.debug("Закэширована фраза: %s -> %s", phrase, translated)
+            except Exception as exc:
+                logger.debug("Не удалось закэшировать фразу %s: %s", phrase, exc)
+    
+    logger.info("Прогрев кэша завершён")
+
+
 async def main() -> None:
     await db.init_db()
+    
+    # ⚡ Предварительный прогрев кэша
+    await _warm_up_cache()
 
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()

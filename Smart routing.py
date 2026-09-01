@@ -13,6 +13,7 @@
 import asyncio
 import logging
 import re
+from functools import lru_cache
 
 from transliteration import transliterate_to_mkhedruli
 
@@ -69,6 +70,7 @@ _DIGIT_RE = re.compile(r"\d")
 MAX_SIMPLE_WORD_COUNT = 5
 
 
+@lru_cache(maxsize=1024)
 def is_simple_text(text: str) -> bool:
     """
     Эвристическая (НЕ основанная на ИИ) оценка того, можно ли перевести текст
@@ -82,6 +84,9 @@ def is_simple_text(text: str) -> bool:
     Это дешёвая эвристика, а не лингвистический анализ — она может ошибаться
     на неочевидных случаях. Задача — отсеять явно бытовые фразы, чтобы не
     тратить на них квоту Gemini API, а не дать 100%-точную классификацию.
+    
+    ⚡ Кэшируется с @lru_cache — повторные вызовы одного и того же текста
+       мгновенны.
     """
     normalized = _normalize(text)
     if not normalized:
