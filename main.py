@@ -112,7 +112,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-3.6-flash"
 GEMINI_TIMEOUT = 15  # секунды — максимум времени на ответ от Gemini
 GOOGLE_TRANSLATE_TIMEOUT = 10  # секунды — максимум для Google Translate
-MAX_CONCURRENT_GEMINI_REQUESTS = 3  # максимум параллельных запросов к Gemini
 
 logging.basicConfig(
     level=logging.INFO,
@@ -175,44 +174,27 @@ MKHEDRULI_REVEAL_PREFIX = "🇬🇪 Мхедрули:"
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ⚡ Семафор для ограничения параллельных запросов к Gemini
-# Предотвращает перегрузку API при одновременных запросах от множества пользователей
-_gemini_semaphore: Optional[asyncio.Semaphore] = None
-
-def _get_gemini_semaphore() -> asyncio.Semaphore:
-    """Ленивая инициализация семафора."""
-    global _gemini_semaphore
-    if _gemini_semaphore is None:
-        _gemini_semaphore = asyncio.Semaphore(MAX_CONCURRENT_GEMINI_REQUESTS)
-    return _gemini_semaphore
-
 
 async def call_gemini(contents: str, system_prompt: str) -> str:
     """
     Отправляет текст в Gemini с заданным системным промтом и возвращает результат.
     Бросает исключение наверх при ошибке — обработка на стороне вызывающего кода.
     Имеет таймаут для предотвращения зависаний.
-    
-    ⚡ Использует семафор для ограничения параллельных запросов (до MAX_CONCURRENT_GEMINI_REQUESTS).
-    Это предотвращает перегрузку Gemini API при пиковых нагрузках.
     """
-    semaphore = _get_gemini_semaphore()
-    
-    async with semaphore:
-        try:
-            response = await asyncio.wait_for(
-                gemini_client.aio.models.generate_content(
-                    model=GEMINI_MODEL,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_prompt,
-                        temperature=0.2,
-                    ),
+    try:
+        response = await asyncio.wait_for(
+            gemini_client.aio.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=0.2,
                 ),
-                timeout=GEMINI_TIMEOUT
-            )
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"Gemini API не ответила за {GEMINI_TIMEOUT} секунд")
+            ),
+            timeout=GEMINI_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        raise TimeoutError(f"Gemini API не ответила за {GEMINI_TIMEOUT} секунд")
 
     result = (response.text or "").strip()
     if not result:
@@ -661,8 +643,8 @@ async def _warm_up_cache() -> None:
 async def main() -> None:
     await db.init_db()
     
-    # ⚡ Предварительный прогрев кэша
-    await _warm_up_cache()
+    # ⚡ Предварительный прогрев кэша (закомментирован временно для отладки)
+    # await _warm_up_cache()
 
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()
