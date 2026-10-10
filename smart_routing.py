@@ -14,6 +14,7 @@ import asyncio
 import logging
 import re
 from functools import lru_cache
+from typing import Optional
 
 from transliteration import transliterate_to_mkhedruli
 
@@ -60,6 +61,31 @@ def _normalize(text: str) -> str:
 
 
 _SIMPLE_PHRASES_MKHEDRULI = {_normalize(transliterate_to_mkhedruli(p)) for p in _SIMPLE_PHRASES_LATIN}
+
+# Частые фразы с фиксированным переводом: сначала проверяем их, чтобы
+# не делать лишние HTTP-запросы к Google Translate и тем более Gemini.
+_TEMPLATE_TRANSLATIONS = {
+    "gamarjoba": "Привет",
+    "gagimarjos": "Здравствуйте",
+    "gaumarjos": "Здравствуйте",
+    "madloba": "Спасибо",
+    "didi madloba": "Большое спасибо",
+    "rogor xar": "Как дела?",
+    "rogor khar": "Как дела?",
+    "ki": "Да",
+    "ara": "Нет",
+    "nakhvamdis": "До свидания",
+    "dila mshvidobisa": "Доброе утро",
+    "ghame mshvidobisa": "Доброй ночи",
+    "sad xar": "Где ты?",
+    "sad khar": "Где ты?",
+    "kargad": "Хорошо",
+    "cudad var": "Мне плохо",
+    "ver gavige": "Я не понимаю",
+}
+_TEMPLATE_TRANSLATIONS_MKHEDRULI = {
+    _normalize(transliterate_to_mkhedruli(key)): value for key, value in _TEMPLATE_TRANSLATIONS.items()
+}
 
 # Признаки "сложного" текста: даты/номера статей (цифры), официальная
 # пунктуация (скобки, кавычки, двоеточие/точка с запятой), составные
@@ -109,6 +135,27 @@ def is_simple_text(text: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Google Translate (бесплатно, без ключа API)
 # --------------------------------------------------------------------------- #
+
+
+def translate_from_template(text: str) -> Optional[str]:
+    """Возвращает фиксированный перевод для часто встречающихся фраз.
+
+    Сначала проверяем латинский/транслит-вариант пользователя, затем уже
+    вариант, переведённый локально в мхедрули, чтобы шаблонные ответы работали
+    и для вариаций вроде "rogor xar" / "rogor khar".
+    """
+    normalized = _normalize(text)
+    if not normalized:
+        return None
+
+    if normalized in _TEMPLATE_TRANSLATIONS:
+        return _TEMPLATE_TRANSLATIONS[normalized]
+
+    mkhedruli = _normalize(transliterate_to_mkhedruli(text))
+    if mkhedruli in _TEMPLATE_TRANSLATIONS_MKHEDRULI:
+        return _TEMPLATE_TRANSLATIONS_MKHEDRULI[mkhedruli]
+
+    return None
 
 
 def _translate_via_google_sync(text: str) -> str:

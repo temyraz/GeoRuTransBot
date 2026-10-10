@@ -92,7 +92,7 @@ from keyboards import (
 )
 from modes import DEFAULT_MODE, DEFAULT_TONE, MODE_GEO_RU, MODES, TONES, build_system_prompt
 from prompts import ALPHABET_CHEATSHEET_HTML, EXPLAIN_PROMPT
-from smart_routing import is_simple_text, translate_via_google
+from smart_routing import is_simple_text, translate_from_template, translate_via_google
 from transliteration import transliterate_to_mkhedruli
 from vocabulary import VOCAB_DELETE_CALLBACK_PREFIX, VOCAB_PAGE_CALLBACK_PREFIX, render_vocabulary_page
 
@@ -205,25 +205,30 @@ async def call_gemini(contents: str, system_prompt: str) -> str:
 
 async def translate_geo_to_ru_smart(user_text: str, tone: str) -> Tuple[str, str, str]:
     """
-    Полный пайплайн режима GEO Translit -> RU: локальная транслитерация в
-    мхедрули -> оценка сложности -> перевод через Google Translate (простой
-    текст) или Gemini (сложный текст), с автоматическим фоллбэком на другой
-    провайдер в обе стороны, если выбранный недоступен.
+    Полный пайплайн режима GEO Translit -> RU:
+      1) фиксированные шаблоны для типовых фраз;
+      2) бесплатный Google Translate для простых фраз;
+      3) Gemini только для действительно сложных случаев.
 
     Возвращает (translated_text, mkhedruli_text, provider) — provider только
     для логирования/отладки (какой путь сработал).
-    
+
     ⚡ Использует кэш для избежания повторных API-запросов.
     """
     mkhedruli_text = transliterate_to_mkhedruli(user_text)
-    
+
     # Проверяем кэш
     cached = get_cached_translation(MODE_GEO_RU, tone, user_text)
     if cached is not None:
         translated, cached_mkhedruli, provider = cached
         logger.info("Перевод найден в кэше (режим GEO->RU, chat_text=%s)", user_text[:50])
         return translated, cached_mkhedruli or mkhedruli_text, f"{provider}_cached"
-    
+
+    template_translation = translate_from_template(user_text)
+    if template_translation is not None:
+        cache_translation(MODE_GEO_RU, tone, user_text, template_translation, mkhedruli_text, "template")
+        return template_translation, mkhedruli_text, "template"
+
     system_prompt = build_system_prompt(MODE_GEO_RU, tone)
 
     if is_simple_text(mkhedruli_text):
@@ -242,24 +247,9 @@ async def translate_geo_to_ru_smart(user_text: str, tone: str) -> Tuple[str, str
             cache_translation(MODE_GEO_RU, tone, user_text, translated, mkhedruli_text, "gemini_fallback")
             return translated, mkhedruli_text, "gemini_fallback"
 
-    try:
-        translated = await call_gemini(mkhedruli_text, system_prompt)
-        cache_translation(MODE_GEO_RU, tone, user_text, translated, mkhedruli_text, "gemini")
-        return translated, mkhedruli_text, "gemini"
-    except Exception as gemini_exc:
-        logger.warning(
-            "Gemini недоступен для сложного текста (%s), переключаюсь на Google Translate", gemini_exc
-        )
-        try:
-            translated = await asyncio.wait_for(
-                translate_via_google(mkhedruli_text),
-                timeout=GOOGLE_TRANSLATE_TIMEOUT
-            )
-            cache_translation(MODE_GEO_RU, tone, user_text, translated, mkhedruli_text, "google_translate_fallback")
-            return translated, mkhedruli_text, "google_translate_fallback"
-        except Exception:
-            logger.exception("Google Translate тоже недоступен — оба провайдера отказали")
-            raise gemini_exc  # пробрасываем исходную ошибку Gemini (например, 429) наверх
+    translated = await call_gemini(mkhedruli_text, system_prompt)
+    cache_translation(MODE_GEO_RU, tone, user_text, translated, mkhedruli_text, "gemini")
+    return translated, mkhedruli_text, "gemini"
 
 
 def user_facing_gemini_error(exc: Exception) -> str:
