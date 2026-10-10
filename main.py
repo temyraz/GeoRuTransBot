@@ -59,8 +59,8 @@ import logging
 import os
 import re
 import sys
-from collections import OrderedDict
-from typing import Dict, NamedTuple, Optional, Tuple
+from collections import OrderedDict, deque
+from typing import Deque, Dict, NamedTuple, Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -78,6 +78,10 @@ from keyboards import (
     EXPLAIN_CALLBACK_DATA,
     MENU_BUTTON_ALPHABET,
     MENU_BUTTON_DICTIONARY,
+    MENU_BUTTON_EXAMPLES,
+    MENU_BUTTON_HELP,
+    MENU_BUTTON_HISTORY,
+    MENU_BUTTON_QUICK,
     MENU_BUTTON_SETTINGS,
     MHEDRULI_CALLBACK_DATA,
     MODE_CALLBACK_PREFIX,
@@ -85,6 +89,7 @@ from keyboards import (
     SAVE_CALLBACK_DATA,
     TONE_CALLBACK_PREFIX,
     build_main_menu_keyboard,
+    build_quick_phrases_keyboard,
     build_settings_keyboard,
     build_translation_keyboard,
     render_settings_text,
@@ -133,6 +138,8 @@ if not GEMINI_API_KEY:
 
 user_modes: Dict[int, str] = {}
 user_tones: Dict[int, str] = {}
+user_recent_translations: Dict[int, Deque[Tuple[str, str, str]]] = {}
+MAX_RECENT_TRANSLATIONS = 8
 
 
 class PendingTranslation(NamedTuple):
@@ -164,6 +171,22 @@ def remember_translation(
     pending_translations.move_to_end(key)
     while len(pending_translations) > MAX_PENDING_TRANSLATIONS:
         pending_translations.popitem(last=False)
+
+
+def remember_recent_translation(user_id: int, original: str, translated: str, mode: str) -> None:
+    history = user_recent_translations.setdefault(user_id, deque(maxlen=MAX_RECENT_TRANSLATIONS))
+    history.appendleft((original, translated, mode))
+
+
+def render_recent_history(user_id: int) -> str:
+    history = user_recent_translations.get(user_id, deque())
+    if not history:
+        return "📜 История переводов пуста. Отправьте фразу, чтобы она появилась здесь."
+
+    lines = ["📜 Последние переводы:"]
+    for idx, (original, translated, mode) in enumerate(history, start=1):
+        lines.append(f"{idx}. {original} → {translated} [{mode}]")
+    return "\n".join(lines)
 
 
 MKHEDRULI_REVEAL_PREFIX = "🇬🇪 Мхедрули:"
@@ -324,6 +347,83 @@ async def handle_settings(message: Message) -> None:
 @router.message(F.text == MENU_BUTTON_SETTINGS)
 async def handle_settings_menu_button(message: Message) -> None:
     await handle_settings(message)
+
+
+@router.message(Command("help"))
+async def handle_help_command(message: Message) -> None:
+    await message.answer(
+        "🚀 Что умеет бот\n\n"
+        "• Переводит грузинский чат-транслит в русский\n"
+        "• Поддерживает режим RU ➡️ GEO Translit\n"
+        "• Показывает исходный текст в мхедрули\n"
+        "• Работает с короткими бытовыми фразами мгновенно\n"
+        "• Поддерживает сохранение в словарь\n"
+        "• Есть шпаргалка по транслиту и режимы настроек\n\n"
+        "Команды:\n"
+        "/start — приветствие\n"
+        "/settings — режимы и тональность\n"
+        "/dictionary — мой словарь\n"
+        "/alphabet — шпаргалка по буквам\n"
+        "/help — помощь\n"
+        "/examples — примеры фраз\n"
+        "/quick — быстрые фразы по темам\n"
+        "/history — последние переводы",
+        reply_markup=build_main_menu_keyboard(),
+    )
+
+
+@router.message(F.text == "❓ Помощь")
+async def handle_help_menu_button(message: Message) -> None:
+    await handle_help_command(message)
+
+
+@router.message(Command("examples"))
+async def handle_examples_command(message: Message) -> None:
+    await message.answer(
+        "💬 Попробуйте одну из этих фраз:\n\n"
+        "• gamarjoba\n"
+        "• madloba\n"
+        "• rogor xar\n"
+        "• ras akhali ambavi\n"
+        "• nakhvamdis\n"
+        "• sad khar\n"
+        "• ver gavige\n\n"
+        "Можно писать как в латинице, так и с небольшими вариациями — бот попробует распознать и перевести.",
+        reply_markup=build_main_menu_keyboard(),
+    )
+
+
+@router.message(F.text == "💬 Примеры")
+async def handle_examples_menu_button(message: Message) -> None:
+    await handle_examples_command(message)
+
+
+@router.message(Command("quick"))
+async def handle_quick_command(message: Message) -> None:
+    await message.answer(
+        "⚡ Быстрые фразы по темам:\n\n"
+        "Путешествия: gamarjoba, ra akhali ambavi, sad khar\n"
+        "Еда: chveni asani, chven mivdivart, ginda?\n"
+        "Работа: rogor xar, ver gavige, unda?\n"
+        "Быт: madloba, ki, ara, mshvidobisa\n\n"
+        "Нажмите одну из кнопок ниже или напишите любую из них вручную.",
+        reply_markup=build_quick_phrases_keyboard(),
+    )
+
+
+@router.message(F.text == "⚡ Быстрые фразы")
+async def handle_quick_menu_button(message: Message) -> None:
+    await handle_quick_command(message)
+
+
+@router.message(Command("history"))
+async def handle_history_command(message: Message) -> None:
+    await message.answer(render_recent_history(message.from_user.id), reply_markup=build_main_menu_keyboard())
+
+
+@router.message(F.text == "🕘 История")
+async def handle_history_menu_button(message: Message) -> None:
+    await handle_history_command(message)
 
 
 @router.message(Command("dictionary"))
@@ -584,6 +684,7 @@ async def handle_text(message: Message) -> None:
         await message.answer(user_facing_gemini_error(exc))
         return
 
+    remember_recent_translation(message.from_user.id, user_text, result, mode)
     sent = await message.answer(result, reply_markup=build_translation_keyboard(mode))
     remember_translation(sent.chat.id, sent.message_id, user_text, result, mkhedruli_text)
 

@@ -21,6 +21,22 @@ from modes import MODE_GEO_RU, MODES, TONES
 MENU_BUTTON_DICTIONARY = "📚 Мой словарь"
 MENU_BUTTON_ALPHABET = "📖 Шпаргалка транслита"
 MENU_BUTTON_SETTINGS = "⚙️ Настройки"
+MENU_BUTTON_HELP = "❓ Помощь"
+MENU_BUTTON_EXAMPLES = "💬 Примеры"
+MENU_BUTTON_HISTORY = "🕘 История"
+MENU_BUTTON_QUICK = "⚡ Быстрые фразы"
+
+
+QUICK_PHRASES = [
+    "gamarjoba",
+    "madloba",
+    "rogor xar",
+    "sad khar",
+    "ras akhali ambavi",
+    "nakhvamdis",
+    "ki",
+    "ara",
+]
 
 
 def build_main_menu_keyboard() -> ReplyKeyboardMarkup:
@@ -28,7 +44,17 @@ def build_main_menu_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=MENU_BUTTON_DICTIONARY), KeyboardButton(text=MENU_BUTTON_ALPHABET)],
             [KeyboardButton(text=MENU_BUTTON_SETTINGS)],
+            [KeyboardButton(text=MENU_BUTTON_HELP), KeyboardButton(text=MENU_BUTTON_EXAMPLES)],
+            [KeyboardButton(text=MENU_BUTTON_HISTORY), KeyboardButton(text=MENU_BUTTON_QUICK)],
         ],
+        resize_keyboard=True,
+    )
+
+
+def build_quick_phrases_keyboard() -> ReplyKeyboardMarkup:
+    rows = [QUICK_PHRASES[i : i + 2] for i in range(0, len(QUICK_PHRASES), 2)]
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=phrase) for phrase in row] for row in rows],
         resize_keyboard=True,
     )
 
