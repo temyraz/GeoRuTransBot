@@ -2,5 +2,6 @@ aiogram>=3.4.1,<4.0.0
 google-genai>=0.3.0
 python-dotenv>=1.0.1
 SQLAlchemy>=2.0,<3.0
+greenlet>=3.0.3
 aiosqlite>=0.19,<1.0
 deep-translator>=1.11,<2.0
