@@ -192,10 +192,12 @@ def render_recent_history(user_id: int) -> str:
 MKHEDRULI_REVEAL_PREFIX = "🇬🇪 Мхедрули:"
 
 # --------------------------------------------------------------------------- #
-# Клиент Gemini
+# Клиент Gemini + ограничение параллельности
 # --------------------------------------------------------------------------- #
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+GEMINI_CONCURRENCY_LIMIT = 3
+gemini_request_semaphore = asyncio.Semaphore(GEMINI_CONCURRENCY_LIMIT)
 
 
 async def call_gemini(contents: str, system_prompt: str) -> str:
@@ -205,17 +207,18 @@ async def call_gemini(contents: str, system_prompt: str) -> str:
     Имеет таймаут для предотвращения зависаний.
     """
     try:
-        response = await asyncio.wait_for(
-            gemini_client.aio.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=0.2,
+        async with gemini_request_semaphore:
+            response = await asyncio.wait_for(
+                gemini_client.aio.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        temperature=0.2,
+                    ),
                 ),
-            ),
-            timeout=GEMINI_TIMEOUT
-        )
+                timeout=GEMINI_TIMEOUT
+            )
     except asyncio.TimeoutError:
         raise TimeoutError(f"Gemini API не ответила за {GEMINI_TIMEOUT} секунд")
 

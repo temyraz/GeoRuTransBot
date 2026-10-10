@@ -10,7 +10,7 @@ import re
 from datetime import datetime, timezone
 from typing import Dict, Optional, Sequence
 
-from sqlalchemy import BigInteger, DateTime, Integer, Text, delete, func, select
+from sqlalchemy import BigInteger, DateTime, Integer, Text, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -62,6 +62,10 @@ def normalize_shared_text(value: str) -> str:
 async def init_db() -> None:
     """Создаёт таблицы, если их ещё нет. Вызывается один раз при старте бота."""
     async with _engine.begin() as conn:
+        await conn.execute(text("PRAGMA journal_mode=WAL"))
+        await conn.execute(text("PRAGMA synchronous=NORMAL"))
+        await conn.execute(text("PRAGMA temp_store=MEMORY"))
+        await conn.execute(text("PRAGMA busy_timeout=5000"))
         await conn.run_sync(Base.metadata.create_all)
 
 
