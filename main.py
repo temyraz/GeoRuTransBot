@@ -95,9 +95,9 @@ from keyboards import (
     render_settings_text,
     replace_button,
 )
-from modes import DEFAULT_MODE, DEFAULT_TONE, MODE_GEO_RU, MODES, TONES, build_system_prompt
+from modes import DEFAULT_MODE, DEFAULT_TONE, MODE_GEO_RU, MODES, TONES, build_system_prompt, get_mode_description
 from prompts import ALPHABET_CHEATSHEET_HTML, EXPLAIN_PROMPT
-from smart_routing import is_simple_text, translate_from_template, translate_via_google
+from smart_routing import is_simple_text, refresh_shared_library_cache, translate_from_template, translate_via_google
 from transliteration import transliterate_to_mkhedruli
 from vocabulary import VOCAB_DELETE_CALLBACK_PREFIX, VOCAB_PAGE_CALLBACK_PREFIX, render_vocabulary_page
 
@@ -322,13 +322,15 @@ async def handle_start(message: Message) -> None:
     user_modes.setdefault(user_id, DEFAULT_MODE)
     user_tones.setdefault(user_id, DEFAULT_TONE)
     await message.answer(
-        "Привет! Я перевожу между грузинским чат-транслитом, русским языком и "
-        "грузинским алфавитом (мхедрули).\n\n"
+        "✨ GeoRuTransBot\n\n"
+        "Супербыстрый перевод между грузинским чат-транслитом, русским и мхедрули.\n\n"
+        "• Быстрые ответы для повседневных фраз\n"
+        "• Мгновенный режим шаблонных переводов\n"
+        "• Словарь, история и шпаргалка по буквам\n\n"
         f"Текущий режим: {MODES[DEFAULT_MODE]['label']}\n"
-        f"Тональность: {TONES[DEFAULT_TONE]['label']}\n"
-        "Сменить их можно командой /settings.\n\n"
-        "Просто отправьте текстовое сообщение — переведу его в выбранном режиме. "
-        "Кнопки ниже — быстрый доступ к словарю и шпаргалке.",
+        f"Тональность: {TONES[DEFAULT_TONE]['label']}\n\n"
+        "Нажмите /settings, чтобы настроить стиль, или просто напишите фразу — "
+        "я переведу её в выбранном режиме.",
         reply_markup=build_main_menu_keyboard(),
     )
 
@@ -352,24 +354,84 @@ async def handle_settings_menu_button(message: Message) -> None:
 @router.message(Command("help"))
 async def handle_help_command(message: Message) -> None:
     await message.answer(
-        "🚀 Что умеет бот\n\n"
-        "• Переводит грузинский чат-транслит в русский\n"
-        "• Поддерживает режим RU ➡️ GEO Translit\n"
-        "• Показывает исходный текст в мхедрули\n"
-        "• Работает с короткими бытовыми фразами мгновенно\n"
-        "• Поддерживает сохранение в словарь\n"
-        "• Есть шпаргалка по транслиту и режимы настроек\n\n"
-        "Команды:\n"
-        "/start — приветствие\n"
+        "✨ GeoRuTransBot\n"
+        "────────────────────\n"
+        "Новый уровень удобства для перевода и общения.\n\n"
+        "▣ Что умеет\n"
+        "• GEO Translit → RU\n"
+        "• RU → GEO Translit\n"
+        "• GEO Translit → мхедрули\n"
+        "• Быстрые шаблонные ответы для частых фраз\n"
+        "• История переводов и личный словарь\n"
+        "• Общая библиотека для всех пользователей\n"
+        "• Поддержка быстрых тем и примеров\n\n"
+        "▣ Команды\n"
+        "/start   — приветствие\n"
         "/settings — режимы и тональность\n"
         "/dictionary — мой словарь\n"
-        "/alphabet — шпаргалка по буквам\n"
-        "/help — помощь\n"
-        "/examples — примеры фраз\n"
-        "/quick — быстрые фразы по темам\n"
-        "/history — последние переводы",
+        "/alphabet — шпаргалка\n"
+        "/add     — добавить фразу в общую библиотеку\n"
+        "/help      — помощь\n"
+        "/examples  — примеры\n"
+        "/quick     — быстрые фразы\n"
+        "/history   — последние переводы",
         reply_markup=build_main_menu_keyboard(),
     )
+
+
+@router.message(Command("add"))
+async def handle_add_shared_phrase(message: Message) -> None:
+    payload = message.get_args()
+    if not payload:
+        await message.answer(
+            "Использование: /add <фраза> | <перевод>\n\n"
+            "Пример: /add rogor xar | Как дела?\n"
+            "Или: /add sad khar=Где ты?",
+            reply_markup=build_main_menu_keyboard(),
+        )
+        return
+
+    raw_pair = payload.strip()
+    separator = None
+    for candidate in ("|", "=>", "->", "—", "="):
+        if candidate in raw_pair:
+            separator = candidate
+            break
+
+    if separator is None:
+        await message.answer(
+            "Формат должен быть таким: /add <фраза> | <перевод>\n\n"
+            "Например: /add gamarjoba | Привет",
+            reply_markup=build_main_menu_keyboard(),
+        )
+        return
+
+    original, translated = raw_pair.split(separator, 1)
+    original = " ".join(original.strip().split())
+    translated = " ".join(translated.strip().split())
+
+    if not original or not translated:
+        await message.answer("Пустая фраза или перевод. Проверьте формат команды.")
+        return
+
+    try:
+        created = await db.add_shared_phrase(original, translated, message.from_user.id)
+    except Exception:
+        logger.exception("Ошибка при сохранении в общую библиотеку (user_id=%s)", message.from_user.id)
+        await message.answer("⚠️ Не удалось сохранить в общую библиотеку. Попробуйте ещё раз.")
+        return
+
+    if created:
+        await refresh_shared_library_cache()
+        await message.answer(
+            f"✅ Добавлено в общую библиотеку:\n{original} → {translated}",
+            reply_markup=build_main_menu_keyboard(),
+        )
+    else:
+        await message.answer(
+            f"ℹ️ Такая запись уже есть в общей библиотеке:\n{original} → {translated}",
+            reply_markup=build_main_menu_keyboard(),
+        )
 
 
 @router.message(F.text == "❓ Помощь")
@@ -401,12 +463,12 @@ async def handle_examples_menu_button(message: Message) -> None:
 @router.message(Command("quick"))
 async def handle_quick_command(message: Message) -> None:
     await message.answer(
-        "⚡ Быстрые фразы по темам:\n\n"
-        "Путешествия: gamarjoba, ra akhali ambavi, sad khar\n"
-        "Еда: chveni asani, chven mivdivart, ginda?\n"
-        "Работа: rogor xar, ver gavige, unda?\n"
-        "Быт: madloba, ki, ara, mshvidobisa\n\n"
-        "Нажмите одну из кнопок ниже или напишите любую из них вручную.",
+        "⚡ Быстрый набор\n\n"
+        "✈️ Путешествия: gamarjoba, ra akhali ambavi, sad khar\n"
+        "🍽️ Еда: ginda, chveni asani, ra shemdegi\n"
+        "💼 Работа: rogor xar, unda, ver gavige\n"
+        "🏠 Быт: madloba, ki, ara, mshvidobisa\n\n"
+        "Нажмите одну из кнопок ниже или отправьте любую из фраз вручную.",
         reply_markup=build_quick_phrases_keyboard(),
     )
 
@@ -479,7 +541,7 @@ async def handle_mode_selection(callback: CallbackQuery) -> None:
     except TelegramBadRequest:
         pass  # пользователь повторно выбрал тот же режим — сообщение не изменилось
 
-    await callback.answer(f"Режим переключён: {MODES[mode_key]['label']}")
+    await callback.answer(f"{MODES[mode_key]['label']} — {get_mode_description(mode_key)}")
 
 
 @router.callback_query(F.data.startswith(TONE_CALLBACK_PREFIX))
@@ -501,7 +563,7 @@ async def handle_tone_selection(callback: CallbackQuery) -> None:
     except TelegramBadRequest:
         pass
 
-    await callback.answer(f"Тональность переключена: {TONES[tone_key]['label']}")
+    await callback.answer(f"Тональность: {TONES[tone_key]['label']} — стиль выбран для текущего режима.")
 
 
 # --------------------------------------------------------------------------- #
@@ -638,7 +700,7 @@ async def handle_vocab_delete(callback: CallbackQuery) -> None:
 @router.message(F.text.startswith("/"))
 async def handle_unknown_command(message: Message) -> None:
     await message.answer(
-        "Неизвестная команда. Доступные команды: /start, /settings, /dictionary, /alphabet"
+        "Неизвестная команда. Доступные команды: /start, /settings, /dictionary, /alphabet, /add"
     )
 
 
@@ -733,7 +795,8 @@ async def _warm_up_cache() -> None:
 
 async def main() -> None:
     await db.init_db()
-    
+    await refresh_shared_library_cache()
+
     # ⚡ Предварительный прогрев кэша (закомментирован временно для отладки)
     # await _warm_up_cache()
 
@@ -747,6 +810,7 @@ async def main() -> None:
             BotCommand(command="settings", description="Режим и тональность перевода"),
             BotCommand(command="dictionary", description="Мой словарь сохранённых фраз"),
             BotCommand(command="alphabet", description="Шпаргалка по транслиту"),
+            BotCommand(command="add", description="Добавить фразу в общую библиотеку"),
         ]
     )
 

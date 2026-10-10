@@ -18,13 +18,13 @@ from modes import MODE_GEO_RU, MODES, TONES
 # Постоянное меню (ReplyKeyboardMarkup) под полем ввода
 # --------------------------------------------------------------------------- #
 
-MENU_BUTTON_DICTIONARY = "📚 Мой словарь"
-MENU_BUTTON_ALPHABET = "📖 Шпаргалка транслита"
+MENU_BUTTON_DICTIONARY = "📚 Словарь"
+MENU_BUTTON_ALPHABET = "📖 Транслит"
 MENU_BUTTON_SETTINGS = "⚙️ Настройки"
 MENU_BUTTON_HELP = "❓ Помощь"
 MENU_BUTTON_EXAMPLES = "💬 Примеры"
 MENU_BUTTON_HISTORY = "🕘 История"
-MENU_BUTTON_QUICK = "⚡ Быстрые фразы"
+MENU_BUTTON_QUICK = "⚡ Быстро"
 
 
 QUICK_PHRASES = [
@@ -48,6 +48,7 @@ def build_main_menu_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=MENU_BUTTON_HISTORY), KeyboardButton(text=MENU_BUTTON_QUICK)],
         ],
         resize_keyboard=True,
+        one_time_keyboard=False,
     )
 
 
@@ -56,6 +57,7 @@ def build_quick_phrases_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=phrase) for phrase in row] for row in rows],
         resize_keyboard=True,
+        one_time_keyboard=False,
     )
 
 
@@ -94,9 +96,12 @@ def build_settings_keyboard(current_mode: str, current_tone: str) -> InlineKeybo
 
 def render_settings_text(current_mode: str, current_tone: str) -> str:
     return (
-        f"Режим перевода: {MODES[current_mode]['label']}\n"
+        "⚙️ Настройки перевода\n"
+        "────────────────────\n"
+        f"Режим: {MODES[current_mode]['label']}\n"
         f"Тональность: {TONES[current_tone]['label']}\n\n"
-        "Выберите режим и тональность:"
+        f"Сценарий: {MODES[current_mode].get('description', '')}\n\n"
+        "Выберите нужный режим и стиль:"
     )
 
 

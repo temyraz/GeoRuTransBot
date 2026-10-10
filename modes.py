@@ -24,9 +24,21 @@ DEFAULT_MODE = MODE_GEO_RU
 MODES: Dict[str, Dict[str, str]] = {
     # "prompt" для GEO_RU используется только на "сложной" ветке смарт-роутинга
     # (translate_geo_to_ru_smart в main.py) — простые фразы до Gemini не доходят.
-    MODE_GEO_RU: {"label": "GEO Translit ➡️ RU", "prompt": SYSTEM_PROMPT_GEO_TO_RU_COMPLEX},
-    MODE_RU_GEO: {"label": "RU ➡️ GEO Translit", "prompt": SYSTEM_PROMPT_RU_TO_GEO},
-    MODE_GEO_KA: {"label": "GEO Translit ➡️ ქართული", "prompt": SYSTEM_PROMPT_GEO_TO_KA},
+    MODE_GEO_RU: {
+        "label": "GEO Translit ➡️ RU",
+        "prompt": SYSTEM_PROMPT_GEO_TO_RU_COMPLEX,
+        "description": "Для быстрой повседневной речи: короткие фразы, разговорный стиль и живой контекст.",
+    },
+    MODE_RU_GEO: {
+        "label": "RU ➡️ GEO Translit",
+        "prompt": SYSTEM_PROMPT_RU_TO_GEO,
+        "description": "Для обратного преобразования в транслит — удобно для набора вручную и переписки.",
+    },
+    MODE_GEO_KA: {
+        "label": "GEO Translit ➡️ ქართული",
+        "prompt": SYSTEM_PROMPT_GEO_TO_KA,
+        "description": "Для перевода в грузинский алфавит и красивого оформления текста в мхедрули.",
+    },
 }
 
 # Режимы, для которых имеет смысл тональность (это "переводы", а не конвертация письменности)
@@ -57,3 +69,7 @@ def build_system_prompt(mode: str, tone: str) -> str:
         tone_modifier = TONES.get(tone, TONES[DEFAULT_TONE])["modifier"]
         return f"{base_prompt}\n{tone_modifier}"
     return base_prompt
+
+
+def get_mode_description(mode: str) -> str:
+    return MODES.get(mode, MODES[DEFAULT_MODE]).get("description", "")

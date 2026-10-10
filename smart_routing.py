@@ -20,6 +20,29 @@ from transliteration import transliterate_to_mkhedruli
 
 logger = logging.getLogger("georgian_translator_bot.smart_routing")
 
+_SHARED_TEMPLATE_TRANSLATIONS: dict[str, str] = {}
+_SHARED_TEMPLATE_TRANSLATIONS_MKHEDRULI: dict[str, str] = {}
+
+
+def set_shared_library_translations(entries: dict[str, str]) -> None:
+    """Обновляет кэш общей библиотеки для всех пользователей."""
+    _SHARED_TEMPLATE_TRANSLATIONS.clear()
+    _SHARED_TEMPLATE_TRANSLATIONS_MKHEDRULI.clear()
+
+    for raw_key, value in entries.items():
+        normalized = _normalize(raw_key)
+        if not normalized:
+            continue
+        _SHARED_TEMPLATE_TRANSLATIONS[normalized] = value
+        _SHARED_TEMPLATE_TRANSLATIONS_MKHEDRULI[_normalize(transliterate_to_mkhedruli(raw_key))] = value
+
+
+async def refresh_shared_library_cache() -> None:
+    from db import load_shared_phrases
+
+    entries = await load_shared_phrases()
+    set_shared_library_translations(entries)
+
 # --------------------------------------------------------------------------- #
 # Оценка сложности текста
 # --------------------------------------------------------------------------- #
@@ -187,10 +210,14 @@ def translate_from_template(text: str) -> Optional[str]:
 
     if normalized in _TEMPLATE_TRANSLATIONS:
         return _TEMPLATE_TRANSLATIONS[normalized]
+    if normalized in _SHARED_TEMPLATE_TRANSLATIONS:
+        return _SHARED_TEMPLATE_TRANSLATIONS[normalized]
 
     mkhedruli = _normalize(transliterate_to_mkhedruli(text))
     if mkhedruli in _TEMPLATE_TRANSLATIONS_MKHEDRULI:
         return _TEMPLATE_TRANSLATIONS_MKHEDRULI[mkhedruli]
+    if mkhedruli in _SHARED_TEMPLATE_TRANSLATIONS_MKHEDRULI:
+        return _SHARED_TEMPLATE_TRANSLATIONS_MKHEDRULI[mkhedruli]
 
     return None
 
